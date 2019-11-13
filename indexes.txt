@@ -1,0 +1,72 @@
+// TODO. Need to add to application the following index creations:
+{
+	"name" : "_id_",
+	"key" : {
+		"_id" : 1
+	},
+	"host" : "MONGODB-PROD-1:27000",
+	"accesses" : {
+		"ops" : NumberLong(18230651),
+		"since" : ISODate("2017-10-01T09:10:17.690Z")
+	}
+}
+{
+	"name" : "status_1_nextTask.lastRetry_1_nextTask.retries_1",
+	"key" : {
+		"status" : 1,
+		"nextTask.lastRetry" : 1,
+		"nextTask.retries" : 1
+	},
+	"host" : "MONGODB-PROD-1:27000",
+	"accesses" : {
+		"ops" : NumberLong(8360818),
+		"since" : ISODate("2017-11-10T12:59:03.544Z")
+	}
+}
+{
+	"name" : "updatedAt_-1",
+	"key" : {
+		"updatedAt" : -1
+	},
+	"host" : "MONGODB-PROD-1:27000",
+	"accesses" : {
+		"ops" : NumberLong(299832),
+		"since" : ISODate("2017-10-01T09:10:17.690Z")
+	}
+}
+{
+	"name" : "status_1_entityId_1_createdAt_1_updatedAt_1",
+	"key" : {
+		"status" : 1,
+		"entityId" : 1,
+		"createdAt" : 1,
+		"updatedAt" : 1
+	},
+	"host" : "MONGODB-PROD-1:27000",
+	"accesses" : {
+		"ops" : NumberLong(71964),
+		"since" : ISODate("2017-11-13T20:54:29.251Z")
+	}
+}
+{
+	"name" : "entityId_1",
+	"key" : {
+		"entityId" : 1
+	},
+	"host" : "MONGODB-PROD-1:27000",
+	"accesses" : {
+		"ops" : NumberLong(13636),
+		"since" : ISODate("2017-10-01T09:10:17.690Z")
+	}
+}
+{
+	"name" : "status_1",
+	"key" : {
+		"status" : 1
+	},
+	"host" : "MONGODB-PROD-1:27000",
+	"accesses" : {
+		"ops" : NumberLong(27253003),
+		"since" : ISODate("2017-10-01T09:10:17.690Z")
+	}
+}

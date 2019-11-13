@@ -1,0 +1,504 @@
+import * as express from 'express';
+import ImageService, {ERR_LOCKED_BY_OTHER_USER} from '../service/imageService';
+import {utils} from '../../../../utils/serializer';
+import {eCropAreaStatus, eImageStatus} from "../../../../models/image/image.model.interface";
+import UserModel from "../../../../models/user/user.model";
+import {ValidateParams} from "../../../../utils/validateParams";
+import {Deserializer} from "../../../../utils/deserializer";
+import * as _ from 'lodash';
+import {Helpers} from "../../../../helpers/helpers";
+import {Logger} from "../../../../utils/logger";
+import ImageModel from '../../../../models/image/image.model'
+import {Timer} from '../../../../utils/timer'
+import metrics from '../../../../utils/metrics'
+import {ConfigService} from '../../../../services/configService';
+
+const skippedCropLoopDur = ConfigService.getConfig('skipcropped').loopDuration;
+
+export class ImageController {
+
+  static updateMetrics = (incrementTag, {histogramTag, time}) => {
+    metrics.increment(`route_image_${incrementTag}`);
+    metrics.histogram(`route_image_${histogramTag}`, time)
+  };
+
+  static imageGetNext(req: express.Request, res: express.Response): Promise<express.Response> {
+
+      let startTime = Date.now();
+      const histogramTag = 'get_next_time';
+      let incrementTag;
+      const time = Timer.start();
+
+      function getImgForCropping(pickOneForCrop?:boolean):Promise<express.Response> {  /// added optional parameter (pickOneForCrop),
+        return new Promise((resolve, reject) => {                                      /// if pickOneForCrop is present, the execution will target image with requestedSkipCrop ON.
+          if (pickOneForCrop) {   ///  this will be executed once skippedCropLoopDur expires, the objective is to get specific image for cropping.
+            ImageService.next(req.body.user.model, req.params.entityId, pickOneForCrop)
+            .then(image => {
+              let incrementTag;
+              if (image) {
+                resolve(res.status(200).json(utils.Serializer.image(image)));
+                incrementTag = 'get_next_success'
+              } else {
+                resolve(res.status(204).send(null));
+                incrementTag = 'get_next_success_no_image'
+              }
+              ImageController.updateMetrics(incrementTag, {histogramTag, time: time.end()})
+            })
+            .catch(error => {
+              ImageController.updateMetrics('get_next_failure', {histogramTag, time: time.end()});
+              resolve(res.status(400).send(error))
+            })
+          } else {  /// this will be executed while skippedCropLoopDur is not expire and image being fetch has requestedSkipCrop ON.
+            ImageService.next(req.body.user.model, req.params.entityId)
+            .then((image) => {
+              if (image !== null) {
+                resolve(handleImageOrSkip(image));
+              } else {
+                resolve(res.status(204).send(null));
+                incrementTag = 'get_next_success_no_image'
+              }
+            })
+            .catch(error => {
+              ImageController.updateMetrics('get_next_failure', {histogramTag, time: time.end()});
+              resolve(res.status(400).send(error))
+            })
+          }
+        })
+      }
+
+      function handleImageOrSkip(image):Promise<express.Response> {
+        return new Promise((resolve, reject) => {
+          if (image.requestedSkipCrop) {   ///// the image is being requested to skip cropping
+            ImageService.validateSkipRequest(image, true)  /// check if request is valid
+            .then((reqToSkip) => {
+              if(reqToSkip.isValid) {            ///// if request is valid, set the image to done
+                ImageService.complete(image.id, req.body.user.model, eImageStatus.done, {comment:null, clientUrl:null}, reqToSkip)
+                  .then((doneImg) => {
+                    if((Date.now() - startTime) < skippedCropLoopDur) {  /// once image is set to done, and there's time remaining (skippedCropLoopDur)
+                      resolve(getImgForCropping());                      /// get image to crop again.
+                    } else {
+                      resolve(getImgForCropping(true));  /// optional parameter (true) sent to target image with requestedSkipCrop OFF
+                    }
+                  })
+                  .catch(err => {
+                    Logger.error("Error image completion:: "+err)
+                  })
+              } else {
+                Logger.info("Request to skip is NOT valid...")   /// to be removed                                           /// request to skip crop is not valid
+                resolve(res.status(200).json(utils.Serializer.image(image))); /// send the image to the user for cropping
+                incrementTag = 'get_next_success';
+                ImageController.updateMetrics(incrementTag, {histogramTag, time: time.end()})
+              }
+            })
+            .catch(error => {
+              Logger.error("Validate skip request error! " + error);         /// if ImageService.validateSkipRequest encountered an error
+              resolve (res.status(400).send("Unable to get image / try again")); /// send status error 400 to the user to try requesting image again
+            })
+          } else {                                                        /// image.requestedSkipCrop is false  /// send the image to the user as
+            resolve(res.status(200).json(utils.Serializer.image(image))); /// send the image to the user
+            incrementTag = 'get_next_success';
+            ImageController.updateMetrics(incrementTag, {histogramTag, time: time.end()})
+          }
+        })
+      }
+
+    return getImgForCropping();
+
+  };
+
+  static imageGetById(req: express.Request, res: express.Response): Promise<express.Response> {
+    return new Promise((resolve, reject) => {
+
+      const rootTag = 'get_by_id';
+      const time = Timer.start();
+      ImageService.byId(req.params.imageId)
+        .then(image => {
+          let incrementTag;
+
+          if (image != null) {
+            incrementTag = `${rootTag}_success`;
+            resolve(res.status(200).json(utils.Serializer.image(image)))
+          } else {
+            incrementTag = `${rootTag}_success_no_image`;
+            resolve(res.status(400).send(null))
+          }
+          ImageController.updateMetrics(incrementTag, {histogramTag: rootTag, time: time.end()})
+        })
+        .catch(error => {
+          ImageController.updateMetrics(`${rootTag}_failure`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(400).send(error))
+        });
+    })
+  }
+
+  static imagePostCreateCropArea(req: express.Request, res: express.Response): Promise<express.Response> {
+    return new Promise((resolve, reject) => {
+
+      let user = req.body.user ? req.body.user.model : null;
+
+      const rootTag = 'post_create_crop_area';
+      const time = Timer.start();
+      return ImageService.createCropArea(req.params.imageId, user, req.body)
+        .then((cropArea) => {
+          let incrementTag;
+          if (cropArea != null) {
+            incrementTag = `${rootTag}_success`;
+            resolve(res.status(200).json({id: cropArea.id, status: eCropAreaStatus[eCropAreaStatus.fresh]}));
+          } else {
+            incrementTag = `${rootTag}_success_no_crop_area`;
+            resolve(res.status(400).send(null));
+          }
+
+          ImageController.updateMetrics(incrementTag, {histogramTag: rootTag, time: time.end()})
+        })
+        .catch(error => {
+          if (error != null && error.name == ERR_LOCKED_BY_OTHER_USER) {
+            resolve(res.status(403).send(error));
+          } else {
+            resolve(res.status(400).send(error))
+          }
+
+          ImageController.updateMetrics(`${rootTag}_failure`, {histogramTag: rootTag, time: time.end()})
+        });
+    })
+  }
+
+  static imageDeleteCropArea(req: express.Request, res: express.Response): Promise<express.Response> {
+    return new Promise((resolve, reject) => {
+
+      const rootTag = 'delete_crop_area';
+      const time = Timer.start();
+      ImageService.deleteCropArea(req.params.imageId, req.params.areaId)
+        .then((wasDeleted) => {
+          let incrementTag;
+          if (wasDeleted === true) {
+            incrementTag = `${rootTag}_success`;
+            resolve(res.status(200).send(null))
+          } else {
+            incrementTag = `${rootTag}_failed`;
+            resolve(res.status(400).send(null))
+          }
+          ImageController.updateMetrics(incrementTag, {histogramTag: rootTag, time: time.end()})
+        })
+        .catch(error => {
+          ImageController.updateMetrics(`${rootTag}_failure`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(400).send(error))
+        });
+    })
+  }
+
+  static imagePostComplete(req: express.Request, res: express.Response): Promise<express.Response> {
+    return new Promise((resolve, reject) => {
+
+      const rootTag = 'post_complete';
+      const time = Timer.start();
+
+      let verbAsStatusStr = eImageStatus[utils.Serializer.actionVerbToImageStatus(req.params.verb)];
+      if (!verbAsStatusStr) {
+        metrics.increment(`route_image_${rootTag}_bad_request`);
+        return resolve(res.status(400).send(null));
+      }
+
+      ImageService.complete(req.params.imageId, req.body.user, verbAsStatusStr, req.body)
+        .then((statusUpdated) => {
+          let incrementTag;
+          if (statusUpdated === true) {
+            incrementTag = `${rootTag}_success`;
+            resolve(res.status(200).send(null))
+          } else {
+            incrementTag = `${rootTag}_failed`;
+            resolve(res.status(400).send(null))
+          }
+
+          ImageController.updateMetrics(incrementTag, {histogramTag: rootTag, time: time.end()})
+        })
+        .catch(error => {
+          ImageController.updateMetrics(`${rootTag}_failure`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(400).send(error))
+        });
+    })
+  }
+
+  static imagePostSingleImage(req: express.Request, res: express.Response): Promise<express.Response> {
+
+    return new Promise((resolve, reject) => {
+      let userId = req.body.user.model.id;
+      let imageId = req.params.imageId;
+      const rootTag = 'post_single_image';
+      const time = Timer.start();
+      Promise.all([ImageModel.findById(imageId), UserModel.findById(userId)])
+        .then(([imageModel, userModel]) => {
+          if (imageModel === null) {
+            var msg = `Failed update single image duo to no image found for image.id=${imageModel.id}.`;
+            Logger.error(msg);
+            return Promise.reject(msg);
+          }
+
+          return ImageService.completeAsSingleImage(imageModel, userModel)
+        })
+        .then((msg) => {
+          ImageController.updateMetrics(`${rootTag}_success`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(200).send(null))
+        })
+        .catch(error => {
+          ImageController.updateMetrics(`${rootTag}_failure`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(400).send({"error": error}))
+        })
+    })
+  }
+
+  static imageGetQuery(req: express.Request, res: express.Response): Promise<express.Response> {
+    return new Promise((resolve, reject) => {
+
+      const rootTag = 'get_query';
+      const time = Timer.start();
+      let validatedParams = ValidateParams.imagesQuery(req.query.limit, req.query.offset, req.query);
+      if (!validatedParams) {
+        metrics.increment(`route_image_${rootTag}_bad_request`);
+        return resolve(res.status(400).send("Illegal query params"));
+      }
+
+      return ImageService.query(validatedParams.query, validatedParams.limit, validatedParams.offset)
+        .then((results) => {
+          let incrementTag;
+          if (results != null && results.total != null) {
+            if (results.total > 0) {
+              let serializedResults = {total: results.total, images: utils.Serializer.images(results.images)};
+              resolve(res.status(200).json(serializedResults));
+            } else {
+              resolve(res.status(204).send(null))
+            }
+
+            incrementTag = `${rootTag}_success`
+          } else {
+            incrementTag = `${rootTag}_bad_results`;
+            resolve(res.status(400).send(null))
+          }
+
+          ImageController.updateMetrics(incrementTag, {histogramTag: rootTag, time: time.end()})
+        })
+        .catch(error => {
+          ImageController.updateMetrics(`${rootTag}_failure`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(400).send(error))
+        });
+    })
+  }
+
+  static imagePostCreate(req: express.Request, res: express.Response): Promise<express.Response> {
+    return new Promise((resolve, reject) => {
+      const rootTag = 'post_create';
+
+      if (req.body.tags != null && !_.isArray(req.body.tags)) {
+        metrics.increment(`route_image_${rootTag}_no_tags`);
+        return resolve(res.status(400).send(null));
+      }
+
+      let source = req.body.source == null ? "rest_api_v1.0" : req.body.source;
+      let serializedObj = _.cloneDeep(req.body);
+
+      serializedObj.source = source;
+
+      let requestObj = Deserializer.fromMessageBody(JSON.stringify(serializedObj));
+
+      const time = Timer.start();
+      ImageService.create(requestObj)
+        .then((results) => {
+          let incrementTag;
+          if (results != null && results.id != null) {
+            incrementTag = `${rootTag}_success`;
+            resolve(res.status(201).send(null))
+          } else {
+            incrementTag = `${rootTag}_failed`;
+            resolve(res.status(400).send(null))
+          }
+
+          ImageController.updateMetrics(incrementTag, {histogramTag: rootTag, time: time.end()})
+        })
+        .catch(error => {
+          ImageController.updateMetrics(`${rootTag}_failure`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(400).send(error))
+        });
+    })
+  }
+
+  static reportGetEntitiesStatuses(req: express.Request, res: express.Response): Promise<express.Response> {
+    return new Promise((resolve, reject) => {
+      const rootTag = 'report_entities_statueses';
+      const time = Timer.start();
+      ImageService.reportByEntitiesStatuses()
+        .then((results) => {
+          let incrementTag;
+          if (results != null) {
+            incrementTag = `${rootTag}_success`;
+            resolve(res.status(200).json(results))
+          } else {
+            incrementTag = `${rootTag}_failed`;
+            resolve(res.status(204).send(""))
+          }
+
+          ImageController.updateMetrics(incrementTag, {histogramTag: rootTag, time: time.end()})
+        })
+        .catch(error => {
+          ImageController.updateMetrics(`${rootTag}_failure`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(400).send(error))
+        });
+    })
+  }
+
+  static reportGetEntitiesStatusInProgress(req: express.Request, res: express.Response): Promise<express.Response> {
+    return new Promise((resolve, reject) => {
+      const rootTag = 'report_entities_statueses_in_progress';
+      const time = Timer.start();
+
+      ImageService.reportByEntitiesStatusInProgress()
+        .then((results) => {
+          let incrementTag;
+          if (results != null) {
+            incrementTag = `${rootTag}_success`;
+            resolve(res.status(200).json(results))
+          } else {
+            incrementTag = `${rootTag}_failed`;
+            resolve(res.status(204).send(""))
+          }
+          ImageController.updateMetrics(incrementTag, {histogramTag: rootTag, time: time.end()})
+        })
+        .catch(error => {
+          ImageController.updateMetrics(`${rootTag}_failure`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(400).send(error))
+        });
+    })
+  }
+
+  static reportGetEntitiesPerformance(req: express.Request, res: express.Response): Promise<express.Response> {
+    return new Promise((resolve, reject) => {
+
+      //verify the dates are correctly formatted
+      let fromDate = Helpers.parseDate(req.query.fromDate);
+      let toDate = Helpers.parseDate(req.query.toDate);
+      const rootTag = 'report_entities_performance';
+      const time = Timer.start();
+
+      if (fromDate === null || toDate === null) {
+        metrics.increment(`route_image_${rootTag}_bad_request`);
+        Logger.warn(`Bad request on entities report: both fromDate and toDate query params should be ISO8601 format compliant (fromDate="${req.query.fromDate}" , toDate="${req.query.toDate}")`);
+        resolve(res.status(400).send("Bad request: both fromDate and toDate query params should be ISO8601 format compliant"));
+        return;
+      }
+
+      ImageService.reportByEntities(fromDate, toDate)
+        .then((results) => {
+          let incrementTag;
+          if (results != null) {
+            incrementTag = `${rootTag}_success`;
+            resolve(res.status(200).json(results))
+          } else {
+            incrementTag = `${rootTag}_failed`;
+            resolve(res.status(204).send(""))
+          }
+
+          ImageController.updateMetrics(incrementTag, {histogramTag: rootTag, time: time.end()})
+        })
+        .catch(error => {
+          ImageController.updateMetrics(`${rootTag}_failure`, {histogramTag: rootTag, time: time.end()});
+          res.status(400).send(error);
+          resolve()
+        });
+    })
+  }
+
+  static reportGetUsers(req: express.Request, res: express.Response): Promise<express.Response> {
+    return new Promise((resolve, reject) => {
+
+      //verify the dates are correctly formatted
+      let fromDate = Helpers.parseDate(req.query.fromDate);
+      let toDate = Helpers.parseDate(req.query.toDate);
+
+      const rootTag = 'report_get_users';
+      const time = Timer.start();
+
+      if (fromDate != null && toDate != null) {
+        metrics.increment(`route_image_${rootTag}_bad_request`);
+        Logger.warn(`Bad request on users report: both fromDate and toDate query params should be ISO8601 format compliant (fromDate="${req.query.fromDate}" , toDate="${req.query.toDate}")`);
+        resolve(res.status(400).send("Bad request: both fromDate and toDate query params should be ISO8601 format compliant"));
+        return;
+      }
+
+      ImageService.reportByUsers(req.header("VATBOX-USER-ID"), fromDate, toDate)
+        .then((results) => {
+          let incrementTag;
+          if (results != null) {
+            incrementTag = `${rootTag}_success`;
+            resolve(res.status(200).json(results))
+          } else {
+            incrementTag = `${rootTag}_failed`;
+            resolve(res.status(204).send(""))
+          }
+          ImageController.updateMetrics(incrementTag, {histogramTag: rootTag, time: time.end()})
+        })
+        .catch(error => {
+          ImageController.updateMetrics(`${rootTag}_failure`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(400).send(error))
+        });
+    })
+  }
+
+  static imageGetStatusByImaginaryId(req: express.Request, res: express.Response): Promise<express.Response> {
+    return new Promise((resolve, reject) => {
+      const rootTag = 'get_status_by_imaginary_id';
+      const time = Timer.start();
+      ImageService.byImaginaryId(req.params.imaginaryId)
+        .then(results => {
+          let incrementTag;
+          if (results != null) {
+            incrementTag = `${rootTag}_success`;
+            resolve(res.status(200).json(results))
+          } else {
+            incrementTag = `${rootTag}_failed`;
+            resolve(res.status(204).send(null))
+          }
+        })
+        .catch(error => {
+          ImageController.updateMetrics(`${rootTag}_failure`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(400).send(error))
+        });
+
+    })
+  }
+
+  static getImagesStatusErrorCount(req: express.Request, res: express.Response): Promise<express.Response> {
+    return new Promise((resolve, reject) => {
+      const rootTag = 'status_error_count';
+      const time = Timer.start();
+      const to = req.query.to ? new Date(parseInt(req.query.to, 10)).getTime() : undefined;
+      const from = req.query.from ? new Date(parseInt(req.query.from, 10)).getTime() : undefined;
+      ImageService.getImagesStatusErrorCount({from, to})
+        .then(count => {
+          ImageController.updateMetrics(`${rootTag}_success`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(200).json({count}))
+        })
+        .catch(error => {
+          ImageController.updateMetrics(`${rootTag}_failure`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(400).send(error))
+        })
+    })
+  }
+
+  static retryFailureImages(req: express.Request, res: express.Response): Promise<express.Response> {
+    return new Promise((resolve, reject) => {
+      const rootTag = 'retry_failure_images';
+      const time = Timer.start();
+      const to = req.body.to ? new Date(parseInt(req.body.to, 10)).getTime() : undefined;
+      const from = req.body.from ? new Date(parseInt(req.body.from, 10)).getTime() : undefined;
+      const ids = req.body.ids;
+      ImageService.retryFailureImages({from, to, ids})
+        .then(count => {
+          ImageController.updateMetrics(`${rootTag}_success`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(200).json({count, message: "process finished successfully"}))
+        })
+        .catch(error => {
+          ImageController.updateMetrics(`${rootTag}_failure`, {histogramTag: rootTag, time: time.end()});
+          resolve(res.status(400).send(error))
+        })
+    })
+  }
+}

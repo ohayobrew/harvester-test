@@ -1,0 +1,62 @@
+# Base deployment resource for harvester service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harvester
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      annotations:
+        kubernetes.io/change-cause: 'CHANGE_CAUSE'
+    spec:
+      volumes:
+        - name: config-volume
+          configMap:
+            name: harvester-config
+      containers:
+        - name: harvester
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/harvester-config
+              readOnly: true
+          ports:
+            - containerPort: 3333
+          livenessProbe:
+            initialDelaySeconds: 20
+            httpGet:
+              port: 3333
+              path: /api/internal/v1.0/health/liveness
+            timeoutSeconds: 5
+            periodSeconds: 60
+            failureThreshold: 2
+          readinessProbe:
+            initialDelaySeconds: 30
+            httpGet:
+              port: 3333
+              path: /api/internal/v1.0/health/readiness
+            timeoutSeconds: 5
+            periodSeconds: 60
+            failureThreshold: 2
+          envFrom:
+            - configMapRef:
+                name: common-env
+            - secretRef:
+                name: common-secrets
+            - secretRef:
+                name: secrets-harvester
+          env:
+            - name: NODE_CONFIG_DIR
+              value: /etc/harvester-config
+            - name: STATSD_HOST
+              value: datadog
+            - name: STATSD_PORT
+              value: '8125'
+            - name: STATSD_PREFIX
+              value: Harvester.
+            - name: DB_HOSTS_AND_PORT
+              value: mongodb://$(MONGO_CRED)@$(MONGO_SERVERS)/harvester?authSource=admin&replicaSet=$(MONGO_RS)

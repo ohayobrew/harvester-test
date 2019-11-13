@@ -1,0 +1,80 @@
+{
+  "imageLockForUserMinutes": 15,
+  "maxPaginationLimitSize": 1000,
+  "log": {
+    "level": "debug"
+  },
+  "imagePreProcess": {
+    "apiUrl": "http://prism/prism/prepareImage",
+    "requestTimeoutMs": 60000,
+    "featureName": "imagePreProcess"
+  },
+  "imageStatusChecker": {
+    "runEveryMinutes": 1,
+    "dbLockMinutes": 5
+  },
+  "authorizationCache": {
+    "stdTTLSec": 1,
+    "checkperiodSec": 1
+  },
+  "skipcropped": {
+    "maxPages": 3,
+    "loopDuration": 6000
+  },
+  "serviceName": "serviceHarvester",
+  "defaultWorkloadId": "defaultWorkloadId",
+  "retryCount": 3,
+  "tasks": {
+    "retryIntervalMin": 30,
+    "maxRetries": 3,
+    "delayWhenNoTasksMs": 60000
+  },
+  "imaginaryApi": {
+    "host": "http://imaginary",
+    "publicHost": "https://backoffice.k8rnd.vatbox.com",
+    "apiPath": "/api/exposed/v1.0",
+    "clientsApiPath": "/api/imaginary/v1.0",
+    "imageApi": "/",
+    "infoApi": "/info",
+    "defaultImageFormat": "image/png",
+    "requestTimeoutMs": 1800000
+  },
+  "lemmingsApi": {
+    "host": "http://lemmings2",
+    "apiPath": "/api/exposed/v1.0",
+    "userIdsApi": "/user/ids",
+    "requestTimeoutMs": 60000
+  },
+  "krangApi": {
+    "host": "http://permissions",
+    "apiPath": "/api/internal/v1",
+    "permissionApi": "/scope",
+    "requestTimeoutMs": 60000
+  },
+  "imageIntegration": {
+    "commentPrefix": "Cropping service comment",
+    "clientUrlPrefix": "Crop URL"
+  },
+  "queues": {
+    "deadLettersSuffix": "_Dead_Letters",
+    "longPoll": {
+      "name": "harvester-inbound-staging",
+      "region": "us-west-2",
+      "waitTimeSeconds": 10,
+      "messageRetentionPeriodDays": 14,
+      "maxNumberOfMessages": 4,
+      "maxFailedPollRetries": 3,
+      "delayBeforeNewRetryMs": 300000,
+      "visibilityTimeoutSec": 3600,
+      "maxReceiveCount": 3
+    },
+    "expediteIn": {
+      "name": "expedite_work_staging",
+      "region": "eu-west-1"
+    },
+    "matchMergeIn": {
+      "name": "matcher-inbound-evidence",
+      "region": "us-west-2"
+    }
+  }
+}

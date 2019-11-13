@@ -1,0 +1,8 @@
+{
+  "test": {
+    "url": "mongodb://localhost/harvester_test"
+  },
+  "default": {
+    "url": "mongodb://localhost/harvester"
+  }
+}

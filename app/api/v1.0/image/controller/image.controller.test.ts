@@ -1,0 +1,1064 @@
+import * as request from 'supertest';
+import * as sinon from 'sinon';
+const {expect} = require('chai');
+import * as _ from 'lodash';
+import BaseTest from '../../../../helpers/tests/base';
+import * as ModelFactory from '../../../../helpers/tests/modelFactory'
+import ImageModel from '../../../../models/image/image.model';
+import {utils} from '../../../../utils/serializer';
+import ImageIntegrations from '../../../../utils/imageIntegrations';
+import {ImageController} from './image.controller';
+import ImageService from '../service/imageService';
+import {Deserializer} from '../../../../utils/deserializer';
+import { ImaginaryService } from '../../../../services/imaginaryService'
+import {DBService} from '../../../../services/dbService'
+import {eImageStatus, IImageModel} from "../../../../models/image/image.model.interface";
+import UserModel from '../../../../models/user/user.model'
+import { isDone } from 'nock';
+
+let req, res, statusSpy, jsonSpy, sendSpy, image, nextStub;
+let self = this;
+
+self._updateImageActiveUser = (imageToUpdate: IImageModel, updatedAt: Date, createdAt: Date, userId: string) => {
+  return new Promise( (resolve, reject) => {
+    ImageModel.mongoose.findOne({_id: imageToUpdate.id}).exec()
+    .then((image) => {
+      image.updatedAt = updatedAt;
+      image.createdAt = createdAt;
+      image.activeUser = userId;
+      image.save( (err) => {
+        if (err) {
+          reject(err)
+          return
+        }
+
+        resolve(new ImageModel(image))
+      });
+    })
+    .catch(err => reject(err))
+  })
+
+
+};
+
+let getReqObj = () => {
+  return {
+    query: {},
+    params: {},
+    body: {}
+  }
+}
+
+let getResSpy = () => {
+  return {
+    status: (status) => {
+      self.statusSpy(status);
+      return {
+        json: (obj) => {
+          self.jsonSpy(obj);
+          return obj
+        },
+        send: (body) => {
+          self.sendSpy(body);
+          return body
+        }
+      }
+    }
+  }
+}
+
+let initSpyFunctions = () => {
+  self.statusSpy = sinon.spy();
+  self.sendSpy = sinon.spy();
+  self.jsonSpy = sinon.spy();
+}
+
+self.initSpyAndStub = () => {
+  self.req = getReqObj()
+  self.req.body = {
+    user: { model: {}}
+  }
+
+  self.req.header = (status) => {}
+  self.res = getResSpy()
+  initSpyFunctions()
+
+  self.nextStub = sinon.stub(ImageService, "next").callsFake(() => Promise.resolve(self.image) );
+  self.byIdStub = sinon.stub(ImageService, "byId").callsFake(() => Promise.resolve(self.image) );
+  self.createCropAreaStub = sinon.stub(ImageService, "createCropArea").callsFake(() => Promise.resolve(self.cropArea) );
+  self.deleteCropAreaStub = sinon.stub(ImageService, "deleteCropArea").callsFake(() => Promise.resolve(self.isCropAreaDeleted) );
+  self.completeStub = sinon.stub(ImageService, "complete").callsFake(() => Promise.resolve(self.isStatusUpdated) );
+  self.queryStub = sinon.stub(ImageService, "query").callsFake(() => Promise.resolve(self.queryResults) );
+  self.createStub = sinon.stub(ImageService, "create").callsFake((param) => Promise.resolve( (param == null)? null : self.createResults ) );
+  self.validateSkipRequestStub = sinon.stub(ImageService, "validateSkipRequest").callsFake(() => Promise.resolve(self.reqToSkip));
+};
+
+self.unwrapStub = () => {
+  self.nextStub.restore();
+  self.byIdStub.restore();
+  self.createCropAreaStub.restore();
+  self.deleteCropAreaStub.restore();
+  self.completeStub.restore();
+  self.queryStub.restore();
+  self.createStub.restore();
+  self.validateSkipRequestStub.restore();
+};
+
+// Unit tests for routing inner logic
+describe('Image Controller v1.0', () => {
+
+  before((done) => {
+    DBService.clearDB().then(done); done();
+  });
+
+  describe(".imageGetNext", () => {
+
+    beforeEach((done) => {
+      DBService.clearDB()
+        .then(()=>{
+          self.initSpyAndStub();
+          done();
+        }); done();
+    });
+
+    afterEach(() => { isDone();
+      self.unwrapStub();
+    });
+
+    it('should set status to 200 if image is exist and serialized', (done) => {
+      ImageModel.create(ModelFactory.Factory.generateImage(ModelFactory.imageInProgressWithoutTags, {imaginaryIdOriginal: "1234"}))
+        .then((image) => {self.image = image})
+        .then(() => ImageController.imageGetNext(self.req, self.res))
+        .then((returnVal) => {
+          expect(self.nextStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+
+          expect(self.jsonSpy.callCount).to.equal(1);
+          expect(self.jsonSpy.firstCall.args[0]).to.exist;
+          expect(self.jsonSpy.firstCall.args[0]).have.property("id")
+            .and.to.equal(utils.Serializer.image(self.image).id);
+          expect(self.jsonSpy.firstCall.args[0]).have.property("imaginaryId")
+            .and.to.equal(utils.Serializer.image(self.image).imaginaryId).to.equal("1234");
+          done();
+        });
+    });
+
+    it('should set status to 204 if no image to return', (done) => {
+      self.image = null;
+
+      ImageController.imageGetNext(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.nextStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(204);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+          expect(self.sendSpy.firstCall.args[0]).to.equal(self.image);
+          done();
+        });
+    });
+
+    it('should set status to 400 if error occurred', (done) => {
+      self.image = null;
+
+      // changing return value for case of reject
+      self.nextStub.restore();
+      self.nextStub = sinon.stub(ImageService, "next").callsFake(() => { return Promise.reject(self.image)})
+
+      ImageController.imageGetNext(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.nextStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+          done();
+        });
+    })
+
+    it('should call imageService.validateSkipRequest if image.requestedSkipCrop is true', (done) => {
+      self.reqToSkip = {isValid: false, reason: "image"};
+      self.isStatusUpdated = true;
+      ImageModel.create(ModelFactory.Factory.generateImage(ModelFactory.imageBasicModel1, {requestedSkipCrop: true}))
+        .then((image) => {self.image = image})
+        .then(() => ImageController.imageGetNext(self.req, self.res))
+        .then((returnVal) => {
+          expect(self.nextStub.called).to.equal(true);
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+
+          expect(self.validateSkipRequestStub.called).to.equal(true);
+          done();
+        })
+        .catch(done);
+    });
+
+    it('should return status 400 if imageService.validateSkipRequest encountered an error', (done) => {
+      //self.reqToSkip = {isValid: false, reason: "image"};
+      self.isStatusUpdated = true;
+      self.validateSkipRequestStub.restore();
+      self.validateSkipRequestStub = sinon.stub(ImageService, "validateSkipRequest").callsFake(() => Promise.reject('ERROR!'));
+      ImageModel.create(ModelFactory.Factory.generateImage(ModelFactory.imageBasicModel1, {requestedSkipCrop: true}))
+        .then((image) => {self.image = image})
+        .then(() => ImageController.imageGetNext(self.req, self.res))
+        .then((returnVal) => {
+          expect(self.nextStub.called).to.equal(true);
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+          expect(self.validateSkipRequestStub.called).to.equal(true);
+          done();
+        })
+        .catch(done);
+    });
+
+    // it('should update the image status to done if request to skip cropping is valid', (done) => {
+    //   self.reqToSkip = {isValid: true, reason: "image"};
+    //   self.isStatusUpdated = true;
+    //   self.completeStub.restore();
+    //   self.completeStub = sinon.stub(ImageService, "complete").callsFake(() => Promise.resolve(self.isStatusUpdated) );
+    //   self.validateSkipRequestStub.restore();
+    //   self.validateSkipRequestStub = sinon.stub(ImageService, "validateSkipRequest").callsFake(() => Promise.resolve(self.reqToSkip));
+    //   ImageModel.create(ModelFactory.Factory.generateImage(ModelFactory.imageBasicModel1, {requestedSkipCrop: true}))
+    //     .then((image) => {self.image = image})
+    //     .then(() => ImageController.imageGetNext(self.req, self.res))
+    //     .then((returnVal) => {
+    //       expect(self.nextStub.called).to.equal(true);
+    //       expect(self.statusSpy.callCount).to.equal(1);
+    //       expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+
+    //       expect(self.validateSkipRequestStub.called).to.equal(true);
+    //       expect(self.completeStub.called).to.equal(true);
+    //       expect(self.completeStub.returns(true));
+    //       done();
+    //     })
+    //     .catch(done);
+
+    // });
+
+    it('should return a regular image with status 200 if request to skip crop is not valid', (done) => {
+      self.reqToSkip = {isValid: false};
+      self.isStatusUpdated = true;
+      ImageModel.create(ModelFactory.Factory.generateImage(ModelFactory.imageBasicModel1, {requestedSkipCrop: true}))
+        .then((image) => {self.image = image})
+        .then(() => ImageController.imageGetNext(self.req, self.res))
+        .then((returnVal) => {
+          expect(self.nextStub.called).to.equal(true);
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+
+          expect(self.validateSkipRequestStub.called).to.equal(true);
+          done();
+        })
+        .catch(done);
+    });
+
+  });
+
+  describe(".imageGetById", () => {
+    beforeEach((done) => {
+      DBService.clearDB()
+        .then(()=>{
+          self.initSpyAndStub();
+          done();
+        });
+    });
+
+    afterEach(() => {
+      self.unwrapStub();
+    });
+
+    it("should set status to 200 and serialized image if found", (done) => {
+      ImageModel.create(ModelFactory.imageInProgressWithoutTags)
+        .then((image) => {
+          self.image = image;
+          self.req.params.imageId = image.id;
+        })
+        .then(() => self.image.createCropArea(ModelFactory.objectId1, ModelFactory.cropAreaRequestBody1))
+        .then((cropArea) => self.cropArea = cropArea)
+        .then(() => ImageController.imageGetById(self.req, self.res))
+        .then((returnVal) => {
+          expect(self.byIdStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+
+          expect(self.jsonSpy.callCount).to.equal(1);
+          expect(self.jsonSpy.firstCall.args[0]).to.exist;
+          expect(self.jsonSpy.firstCall.args[0]).have.property("id")
+            .and.to.equal(utils.Serializer.image(self.image).id);
+
+          expect(self.jsonSpy.firstCall.args[0]).have.property("cropAreas");
+          expect(self.jsonSpy.firstCall.args[0].cropAreas.length).to.equal(1);
+          expect(self.jsonSpy.firstCall.args[0].cropAreas[0]).have.property("id");
+          expect(self.jsonSpy.firstCall.args[0].cropAreas[0]).have.property("x").and.to.equal(ModelFactory.cropAreaRequestBody1.x);
+          expect(self.jsonSpy.firstCall.args[0].cropAreas[0]).have.property("y").and.to.equal(ModelFactory.cropAreaRequestBody1.y);
+          expect(self.jsonSpy.firstCall.args[0].cropAreas[0]).have.property("width").and.to.equal(ModelFactory.cropAreaRequestBody1.width);
+          expect(self.jsonSpy.firstCall.args[0].cropAreas[0]).have.property("height").and.to.equal(ModelFactory.cropAreaRequestBody1.height);
+          expect(self.jsonSpy.firstCall.args[0].cropAreas[0]).have.property("status").and.to.equal(ModelFactory.cropAreaRequestBody1.status);
+          done();
+        });
+    });
+
+    it("should set status to 400 if image not found", (done) => {
+      self.image = null;
+      self.req.params.imageId = "foo";
+
+      ImageController.imageGetById(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.byIdStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+          done();
+        })
+    })
+  });
+
+  describe(".imagePostCreateCropArea", () => {
+    beforeEach((done) => {
+      DBService.clearDB()
+        .then(()=>{
+          self.initSpyAndStub();
+          done();
+        });
+    });
+
+    afterEach(() => {
+      self.unwrapStub();
+    });
+
+    it("should set status to 200 if crop area created successfully", (done) => {
+      self.image = null;
+      self.cropArea = ModelFactory.cropAreaRequestBody1;
+      self.req.params.imageId = "bar";
+      self.req.body = ModelFactory.cropAreaRequestBody1;
+
+      ImageController.imagePostCreateCropArea(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.createCropAreaStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+
+          expect(self.jsonSpy.callCount).to.equal(1);
+          expect(self.jsonSpy.firstCall.args[0]).to.have.property("id");
+          expect(self.jsonSpy.firstCall.args[0]).to.have.property("status")
+            .and.to.equal("fresh");
+
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should set status to 400 if imageId not found", (done) => {
+      self.image = null;
+      self.req.params.imageId = "bar";
+      self.req.body = ModelFactory.cropAreaRequestBody1;
+
+      // changing return value for case of reject
+      self.createCropAreaStub.restore();
+      self.createCropAreaStub = sinon.stub(ImageService, "createCropArea").callsFake(() => { return Promise.reject(null)})
+
+      ImageController.imagePostCreateCropArea(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.createCropAreaStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          done();
+        })
+        .catch(done);
+    });
+  })
+
+  describe(".imageDeleteCropArea", () => {
+    beforeEach((done) => {
+      DBService.clearDB()
+        .then(()=>{
+          self.initSpyAndStub();
+          done();
+        });
+    });
+
+    afterEach(() => {
+      self.unwrapStub();
+    });
+
+    it("should set status to 200 if crop area was deleted successfully", (done) => {
+      self.req.params.areaId = "someRealCropAreaId";
+      self.isCropAreaDeleted = true;
+
+      ImageController.imageDeleteCropArea(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.deleteCropAreaStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should set status to 400 if imageId or areaId was not found", (done) => {
+      self.req.params.areaId = "someFakeCropAreaId";
+      self.isCropAreaDeleted = false;
+
+      ImageController.imageDeleteCropArea(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.deleteCropAreaStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          done();
+        })
+        .catch(done);
+    });
+  });
+
+  describe(".imagePostComplete", () => {
+    beforeEach((done) => {
+      DBService.clearDB()
+        .then(()=>{
+          self.initSpyAndStub();
+          done();
+        });
+    });
+
+    afterEach(() => {
+      self.unwrapStub();
+    });
+
+    it("should set status to 200 if status changed successfully", (done) => {
+      self.isStatusUpdated = true;
+      self.req.params.verb = "done";
+
+      ImageController.imagePostComplete(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.completeStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should set status to 400 if no changes was made/failed", (done) => {
+      self.isStatusUpdated = false;
+      self.req.params.verb = "done";
+
+      ImageController.imagePostComplete(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.completeStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should set status to 400 if action verb is illegal", (done) => {
+      self.isStatusUpdated = false;
+      self.req.params.verb = "foo";
+
+      ImageController.imagePostComplete(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.completeStub.callCount).to.equal(0);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          done();
+        })
+        .catch(done);
+    });
+  })
+
+  describe(".imageGetQuery", () => {
+    beforeEach((done) => {
+      DBService.clearDB()
+        .then(()=>{
+          self.initSpyAndStub();
+          self.req.query = {limit: 10, offset: 0, status: "inProgress"};
+          done();
+        });
+    });
+
+    afterEach(() => {
+      self.unwrapStub();
+    });
+
+    it("should set status to 200 if images found", (done) => {
+      ImageModel.create(ModelFactory.imageInProgress1)
+        .then((image) =>  self.image = image)
+        .then(() => self.queryResults = {total: 1, images: [self.image]})
+        .then(() => ImageController.imageGetQuery(self.req, self.res))
+        .then((returnVal) => {
+          expect(self.queryStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+
+          expect(self.jsonSpy.callCount).to.equal(1);
+          expect(self.jsonSpy.firstCall.args[0]).to.exist
+            .and.to.have.property("total")
+            .and.to.equal(1);
+
+          expect(self.jsonSpy.firstCall.args[0]).to.exist
+            .and.to.have.property("images");
+
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should set status to 204 if images not found", (done) => {
+      self.queryResults = {total: 0, images: []};
+
+      ImageController.imageGetQuery(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.queryStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(204);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should set status to 400 if wrong params supplied", (done) => {
+      // changing return value for case of reject
+      self.queryStub.restore();
+      self.queryStub = sinon.stub(ImageService, "query").callsFake(() => { return Promise.reject("error")})
+
+      ImageController.imageGetQuery(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.queryStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should set status to 400 if wrong pagination params supplied", (done) => {
+      self.req.query = { limit: "10", offset: "foo"};
+
+      ImageController.imageGetQuery(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.queryStub.callCount).to.equal(0);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          done();
+        })
+        .catch(done);
+    });
+  });
+
+  describe(".imagePostCreate", () => {
+    beforeEach((done) => {
+      DBService.clearDB()
+        .then(()=>{
+          self.initSpyAndStub();
+          done();
+        });
+    });
+
+    afterEach(() => {
+      self.unwrapStub();
+    });
+
+    it("should set status to 201 if images created", (done) => {
+      let imageObj = _.cloneDeep(ModelFactory.imageInProgress1);
+
+      self.req.body = {
+        metadata: {
+          workloadId: imageObj.requestMetadata.workloadId,
+          reportId: imageObj.requestMetadata.reportId,
+          companyId: imageObj.requestMetadata.companyId,
+          transactionId: imageObj.requestMetadata.transactionId
+        },
+        data: {
+          imageId: imageObj.imaginaryId,
+          entityId: imageObj.entityId,
+          tags: imageObj.tags,
+          source: imageObj.source,
+          reportId: imageObj.reportId
+        }
+      };
+
+      ImageModel.create(imageObj)
+        .then((image) => {
+          self.createResults = image;
+          return ImageController.imagePostCreate(self.req, self.res);
+        })
+        .then((returnVal) => {
+          expect(self.createStub.callCount).to.equal(1);
+          // just making sure deserializer did its job
+          expect(self.createStub.firstCall.args[0].reportId).to.equal(imageObj.reportId);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(201);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should set status to 400 if a required field is missing", (done) => {
+      let imageObj = _.cloneDeep(ModelFactory.imageInProgress1);
+
+      self.req.body = {
+        metadata: {
+          workloadId: undefined, // missing mandatory field
+          reportId: imageObj.requestMetadata.reportId,
+          companyId: imageObj.entityId,
+          transactionId: imageObj.requestMetadata.transactionId
+        },
+        data: {
+          imageId: imageObj.imaginaryId,
+          entityId: imageObj.entityId,
+          tags: imageObj.tags,
+          source: imageObj.source,
+          reportId: imageObj.reportId
+        }
+      };
+
+      ImageController.imagePostCreate(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.createStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should set status to 400 if image not created", (done) => {
+      self.createResults = null;
+
+      ImageController.imagePostCreate(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.createStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should set status to 400 if tags is exist and is not an array of strings", (done) => {
+      self.createResults = null;
+      self.req.body.tags = "str";
+
+      ImageController.imagePostCreate(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.createStub.callCount).to.equal(0);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          done();
+        })
+        .catch(done);
+    });
+  })
+
+  describe(".reportGetEntitiesPerformance", () => {
+    beforeEach((done) => {
+      DBService.clearDB()
+        .then(()=>{
+          self.initSpyAndStub();
+          done();
+        });
+    });
+
+    afterEach(() => {
+      self.unwrapStub();
+    });
+
+    it("should set status to 200 if images found", (done) => {
+      self.queryResults = {}; // mock results
+      self.req.query = {fromDate: ModelFactory.Factory.subtractMinutesFromNowToDate(10), toDate: new Date()};
+      self.reportByEntitiesStub = sinon.stub(ImageService, "reportByEntities").callsFake(() => { return Promise.resolve(self.queryResults) });
+
+      ImageController.reportGetEntitiesPerformance(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.reportByEntitiesStub.callCount).to.equal(1);
+          expect(self.reportByEntitiesStub.firstCall.args[0].toString()).to.equal(self.req.query.fromDate.toString());
+          expect(self.reportByEntitiesStub.firstCall.args[1].toString()).to.equal(self.req.query.toDate.toString());
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+
+          expect(self.jsonSpy.callCount).to.equal(1);
+          expect(self.jsonSpy.firstCall.args[0]).to.exist.and.to.equal(self.queryResults).to.equal(returnVal);
+
+          self.reportByEntitiesStub.restore();
+
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should set status to 204 if no results returned", (done) => {
+      self.queryResults = null; // mock results
+      self.req.query = {fromDate: ModelFactory.Factory.subtractMinutesFromNowToDate(10), toDate: new Date()};
+      self.reportByEntitiesStub = sinon.stub(ImageService, "reportByEntities").callsFake(() => { return Promise.resolve(self.queryResults) });
+
+      ImageController.reportGetEntitiesPerformance(self.req, self.res)
+        .then((returnVal) => {
+          expect(self.reportByEntitiesStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(204);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          self.reportByEntitiesStub.restore();
+
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should set status to 400 if wrong params supplied", (done) => {
+      self.queryResults = null; // mock results
+      self.req.query = {fromDate: "illegal-value", toDate: "illegal-value"};
+      self.reportByEntitiesStub = sinon.stub(ImageService, "reportByEntities").callsFake(() => { return Promise.resolve(self.queryResults) });
+
+      ImageController.reportGetEntitiesPerformance(self.req, self.res)
+        .then((returnVal) => {
+          expect(returnVal).to.exist.and.equal("Bad request: both fromDate and toDate query params should be ISO8601 format compliant");
+          expect(self.reportByEntitiesStub.callCount).to.equal(0);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+
+          self.reportByEntitiesStub.restore();
+
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should set status to 400 if ImageService.reportByEntities() rejected", (done) => {
+      self.queryResults = null; // mock results
+      self.req.query = {fromDate: ModelFactory.Factory.subtractMinutesFromNowToDate(10), toDate: new Date()};
+      self.reportByEntitiesStub = sinon.stub(ImageService, "reportByEntities").callsFake(() => { return Promise.reject("ERROR!") });
+
+      ImageController.reportGetEntitiesPerformance(self.req, self.res)
+        .then((returnVal) => {
+          expect(returnVal).to.not.exist;
+          expect(self.reportByEntitiesStub.callCount).to.equal(1);
+
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+
+          expect(self.sendSpy.callCount).to.equal(1);
+          expect(self.sendSpy.firstCall.args[0]).to.equal("ERROR!");
+
+          self.reportByEntitiesStub.restore();
+
+          done();
+        })
+        .catch(done);
+    });
+  });
+
+  describe(".singleImage", () => {
+
+    let createValue = _.cloneDeep(ModelFactory.imageInProgress1);
+    let legalMessageBody = {
+      metadata: {
+        workloadId: createValue.requestMetadata.workloadId,
+        reportId: createValue.requestMetadata.reportId,
+        companyId: createValue.requestMetadata.companyId,
+        transactionId: createValue.requestMetadata.transactionId
+      },
+      data: {
+        imageId: createValue.imaginaryId, // imaginaryId is the property name in db,
+        entityId: createValue.entityId,
+        tags: createValue.tags,
+        source: createValue.source,
+        reportId: createValue.reportId,
+        skipCrop: false
+      }
+    }
+
+    beforeEach((done) => {
+      DBService.clearDB()
+        .then(() => {
+          return ImageService.create(Deserializer.fromMessageBody(JSON.stringify(legalMessageBody)))
+        })
+        .then( (image) => {
+          self.image = image
+          return UserModel.createUser(ModelFactory.userWithoutTags)
+        })
+        .then((user) => {
+          self.user = user
+          return self._updateImageActiveUser(self.image, new Date(), new Date(), user.id);
+        })
+        .then( (image) => {
+          self.image = image // save with active user
+        })
+        .then( () => {
+          self.req = getReqObj()
+          self.req.params.imageId = self.image.id;
+          self.req.body.user = {
+            model: {
+              id: self.user.id
+            }
+          }
+          self.res = getResSpy()
+          initSpyFunctions()
+          done()
+        })
+    });
+
+    afterEach((done) => {
+      self.isImageFileStub.restore();
+      done()
+    });
+
+    it("should set image status to waitingTask and return 200 if successfully", (done) => {
+      self.isImageFileStub = sinon.stub(ImaginaryService, "isImageFile")
+                                  .callsFake(() => Promise.resolve(true));
+
+      ImageController.imagePostSingleImage(self.req, self.res)
+        .then((msg) => ImageService.byId(self.image.id))
+        .then((updatedImage) => {
+
+          expect(updatedImage).to.be.exist
+          expect(self.image).to.be.exist
+          expect(self.isImageFileStub.callCount).to.equal(1);
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+          expect(self.image.cropAreas.length).to.equal(0);
+          expect(updatedImage.cropAreas.length).to.equal(1);
+          expect(updatedImage.status).to.equal(eImageStatus.waitingTask);
+
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should reject and return 400 if not type of image", (done) => {
+      self.isImageFileStub = sinon.stub(ImaginaryService, "isImageFile")
+                                  .callsFake(() => Promise.resolve(false))
+
+      ImageController.imagePostSingleImage(self.req, self.res)
+        .then((msg) => {
+          expect(self.isImageFileStub.callCount).to.equal(1);
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should reject and return 400 if user is not active on image", (done) => {
+      self.isImageFileStub = sinon.stub(ImaginaryService, "isImageFile")
+                                  .callsFake(() => Promise.resolve(true))
+
+      UserModel.createUser(ModelFactory.userWithInhouseTag)
+        .then((user) => {
+          self.req.body.user = {
+            model: {
+              id: user.id
+            }
+          }
+          return ImageController.imagePostSingleImage(self.req, self.res)
+        })
+        .then((msg) => {
+          expect(self.req.body.userId).to.not.equal(self.image.activeUser);
+          expect(self.isImageFileStub.callCount).to.equal(0);
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(400);
+          done();
+        })
+        .catch(done);
+    });
+
+    it("should reject and return 400 if image already saved as single", (done) => {
+      self.isImageFileStub = sinon.stub(ImaginaryService, "isImageFile")
+                                  .callsFake(() => Promise.resolve(true))
+
+        ImageController.imagePostSingleImage(self.req, self.res)
+        .then(() => ImageController.imagePostSingleImage(self.req, self.res))
+        .then((error) => {
+          expect(self.isImageFileStub.callCount).to.equal(2);
+          expect(self.statusSpy.callCount).to.equal(2);
+          expect(self.statusSpy.secondCall.args[0]).to.equal(400);
+          expect(error['error']).to.exist.and.contain(`image.id=${self.image.id} already saved as single image`);
+          done();
+        })
+        .catch(done)
+    });
+  });
+
+
+  describe(".imageStatusError", () => {
+    var self = this
+
+    const images = [
+      ModelFactory.imageStatusErrorWithMaxRetries,
+      ModelFactory.imageStatusErrorWithMaxRetries,
+      ModelFactory.imageStatusErrorWithMaxRetries
+    ]
+
+    beforeEach((done) => {
+      self.req = {
+        body: {},
+        query: {}
+      };
+      self.res = getResSpy()
+      initSpyFunctions()
+
+      DBService.clearDB()
+        .then(() => Promise.all(images.map(image => ImageModel.create(image))))
+        .then((images) => self.savedImages = images)
+        .then(() => done())
+        .catch(done)
+    });
+
+    it(`should return ${images.length} for images with status error and maxRetries`, (done) => {
+      ImageController.getImagesStatusErrorCount(self.req, self.res)
+        .then((res) => {
+          expect(images.length).to.equal(res['count']);
+          expect(self.statusSpy.callCount).to.equal(1);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+          done();
+        })
+        .catch(done);
+    });
+
+    it(`should return 0 for images with status error and maxRetries with option {from: now}`, (done) => {
+      self.req.query = {from: Date.now()}
+
+      ImageController.getImagesStatusErrorCount(self.req, self.res)
+          .then((res) => {
+            expect(res['count']).to.equal(0);
+            expect(self.statusSpy.callCount).to.equal(1);
+            expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+            done();
+          })
+          .catch(done);
+    });
+
+    it(`should update all images with status error and maxRetries 3`, (done) => {
+
+      ImageController.retryFailureImages(self.req, self.res)
+        .then(() => ImageController.getImagesStatusErrorCount(self.req, self.res))
+        .then((res) => {
+          expect(res['count']).to.equal(0);
+          expect(self.statusSpy.callCount).to.equal(2);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+          expect(self.statusSpy.secondCall.args[0]).to.equal(200);
+          done();
+        })
+        .catch(done);
+    });
+
+    it(`should not update images with status error and maxRetries 3 with filter 'from now' query`, (done) => {
+
+      self.req.body = {from: Date.now()}
+      ImageController.retryFailureImages(self.req, self.res)
+        .then((res) => {
+          expect(res['count']['n']).to.equal(0);
+          self.req.body = {}
+        })
+        .then(() => ImageController.getImagesStatusErrorCount(self.req, self.res))
+        .then((res) => {
+          expect(res['count']).to.equal(images.length);
+          expect(self.statusSpy.callCount).to.equal(2);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+          expect(self.statusSpy.secondCall.args[0]).to.equal(200);
+          done();
+        })
+        .catch(done);
+    });
+
+    it(`should update one specific image by id with status error and maxRetries 3`, (done) => {
+      const imageId = self.savedImages[0]._id
+      self.req.body = {ids: [imageId]}
+      ImageController.retryFailureImages(self.req, self.res)
+        .then((res) => {
+          expect(res['count']['n']).to.equal(1);
+          self.req.body = {}
+        })
+        .then((res) => ImageController.getImagesStatusErrorCount(self.req, self.res))
+        .then((res) => {
+          expect(res['count']).to.equal(images.length-1);
+          expect(self.statusSpy.callCount).to.equal(2);
+          expect(self.statusSpy.firstCall.args[0]).to.equal(200);
+          expect(self.statusSpy.secondCall.args[0]).to.equal(200);
+
+          return ImageModel.findById(imageId)
+
+        })
+        .then(imageModel => {
+          expect(imageModel.status).to.equal(eImageStatus.waitingTask);
+          expect(imageModel.nextTask.retries).to.equal(0);
+
+          done();
+        })
+        .catch(done);
+    });
+  });
+
+  // TODO: test ImageController.reportGetEntitiesStatuses()
+  // TODO: test ImageController.reportGetEntitiesStatusInProgress()
+  // TODO: test ImageController.reportGetUsers()
+  // TODO: test ImageController.configPostEntityPriorities()
+
+});

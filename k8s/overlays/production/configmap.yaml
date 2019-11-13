@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: harvester-config
+  labels:
+    name: harvester-config
+data:
+  db.json: |
+    {
+      "test": {
+        "url": "mongodb://localhost/harvester_test"
+      },
+      "default": {
+        "url": "mongodb://harvesterUsr:uEkWKWbOR0dHt53HnJMF@sgprimary.mongodb.production.internal:27017,sgsecondary.mongodb.production.internal:27017/harvester?authSource=admin&replicaSet=RS-prod2-0"
+      }
+    }
+  config.json: |
+    {
+      "imageLockForUserMinutes": 15,
+      "maxPaginationLimitSize": 1000,
+      "log": {
+        "level": "info",
+        "json": true,
+        "stringify": true
+      },
+      "authorizationCache": {
+        "stdTTLSec": 600,
+        "checkperiodSec": 300
+      },
+      "skipcropped": {
+        "maxPages": 3
+      },
+      "serviceName": "serviceHarvester",
+      "defaultWorkloadId": "583568339c5cfd0d00441592",
+      "retryCount": 3,
+      "tasks": {
+        "retryIntervalMin": 30,
+        "maxRetries": 3,
+        "delayWhenNoTasksMs": 60000
+      },
+      "imaginaryApi": {
+        "host": "http://imaginary",
+        "publicHost": "https://backoffice.vatbox.com",
+        "apiPath": "/api/exposed/v1.0",
+        "clientsApiPath": "/api/imaginary/v1.0",
+        "imageApi": "/",
+        "infoApi": "/info",
+        "defaultImageFormat" : "image/png",
+        "requestTimeoutMs": 1800000
+      },
+      "lemmingsApi": {
+        "host": "http://lemmings2",
+        "apiPath": "/api/exposed/v1.0",
+        "userIdsApi": "/user/ids",
+        "requestTimeoutMs": 60000
+      },
+      "krangApi": {
+        "host": "http://permissions",
+        "apiPath": "/api/exposed/v1",
+        "permissionApi": "/scope",
+        "requestTimeoutMs": 60000
+      },
+      "imagePreProcess": {
+        "apiUrl": "http://prism/prism/prepareImage",
+        "requestTimeoutMs": 60000,
+        "featureName": "imagePreProcess"
+      },
+      "imageIntegration": {
+        "commentPrefix": "Cropping service comment",
+        "clientUrlPrefix": "Crop URL"
+      },
+      "queues": {
+        "deadLettersSuffix": "_Dead_Letters",
+        "longPoll": {
+          "name": "PRODUCTION_harvester-inbound",
+          "region": "eu-west-1",
+          "waitTimeSeconds": 10,
+          "messageRetentionPeriodDays": 14,
+          "maxNumberOfMessages": 4,
+          "maxFailedPollRetries": 3,
+          "delayBeforeNewRetryMs": 300000,
+          "visibilityTimeoutSec": 3600,
+          "maxReceiveCount": 3
+        },
+        "expediteIn": {
+          "name": "PRODUCTION_expedite-inbound-evidences",
+          "region": "eu-west-1"
+        },
+        "matchMergeIn": {
+          "name": "PRODUCTION_harvester_to_bluesquare",
+          "region": "eu-west-1"
+        }
+      },
+      "imageStatusChecker": {
+        "runEveryMinutes": 20,
+        "dbLockMinutes": 15
+      }
+    }

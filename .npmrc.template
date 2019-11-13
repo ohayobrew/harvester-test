@@ -1,0 +1,4 @@
+_auth = ${NPM_AUTH}
+always-auth = true
+email = admin@vatbox.com
+registry=https://vatbox.jfrog.io/vatbox/api/npm/npm-release
